@@ -341,8 +341,17 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
   ctx.atomic(() => { state.set(KV.github.since, cursorAt(round.started)); state.set(KV.github.retries, retries) })
   return { count: notifications.length, interval }
 }
+/**
+ * How much older than the poll cursor a body may be and still count as the thing its notification reports. GitHub can
+ * index a mention after the Issue itself, so the notification may be read one round after the cursor moved past
+ * `created_at`; a body older than one polling interval is a later edit or an unrelated notification about the Thread.
+ */
+function notificationLag(ctx: SourceContext): number {
+  return Math.max(60, ctx.config<GithubConfig>(SOURCE)?.pollSeconds ?? 60) * 1000
+}
 async function readNotified(ctx: SourceContext, round: Round, number: number, item: Retry): Promise<void> {
   const { since } = item
+  const lag = notificationLag(ctx)
   let isPr = item.pr
   if (!isPr) {
     const issue = await ctx.commands.withSignal(round.signal).api(IssueSchema, `issues/${number}`)
@@ -350,9 +359,10 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
     isPr = !!issue.pull_request
     if (!isPr) {
       // An Issue opened by someone other than the agent since the cursor brings its body so a mention in it reaches the gate.
-      // A mention added by a later edit to the body is not read: only the author can be the actor of the body.
+      // A mention added by a later edit to the body is not read: only the author can be the actor of the body, so the body
+      // must be at most one notification lag older than the cursor rather than merely newer than it.
       const { login } = ctx.deployment.github
-      const opened = Date.parse(issue.created_at) >= Date.parse(since) && !sameName(issue.user.login, login)
+      const opened = Date.parse(issue.created_at) >= Date.parse(since) - lag && !sameName(issue.user.login, login)
       if (opened) await ctx.receive(issueTrigger(issue, login))
       await intakeComments(ctx, { number, isPr: false, url: issue.html_url }, since, round)
       nameThread(ctx, number, issue.title)
@@ -361,8 +371,9 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
   if (isPr) {
     const pr = await pull(ctx, round, number)
     // Emit a PR description trigger for PRs opened since the cursor; its ID is the same as the one produced by the repository PR stream.
+    // The same notification lag as for an Issue applies: a PR indexed late still carries the description its author wrote.
     const { login } = ctx.deployment.github
-    if (pr.created_at && Date.parse(pr.created_at) >= Date.parse(since) && !sameName(pr.user.login, login)) {
+    if (pr.created_at && Date.parse(pr.created_at) >= Date.parse(since) - lag && !sameName(pr.user.login, login)) {
       const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
       await ctx.receive(pullTrigger(opened, login))
     }

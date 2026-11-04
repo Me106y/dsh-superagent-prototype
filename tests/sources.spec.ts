@@ -910,6 +910,24 @@ describe('github source', () => {
     expect(h.receive).not.toHaveBeenCalled()
     h.store.close()
   })
+  it('takes in an Issue body that GitHub notified after the cursor moved past its creation', async () => {
+    const h = host()
+    // GitHub can index a mention after the Issue itself, so the notification is read one round after `created_at`;
+    // judging by the cursor alone would drop a mention the author did write in the body.
+    notify(h, [issue(12, { body: '@agent-bot please fix the login', created_at: '2026-09-09T00:00:00Z' })], {},
+      '2026-09-09T00:00:07.000Z')
+    await pollRound(h)
+    expect(h.receive.mock.calls.map(([trigger]) => trigger)).toEqual([expect.objectContaining({ id: key('github-issue', '12'),
+      text: 'Login fails\n\n@agent-bot please fix the login', addressed: 'mention' })])
+    // The slack stays bounded: a body older than one polling interval is still an edit or an unrelated notification.
+    const late = host()
+    notify(late, [issue(13, { body: '@agent-bot please fix the login', created_at: '2026-09-08T23:55:00Z' })], {},
+      '2026-09-09T00:00:07.000Z')
+    await pollRound(late)
+    expect(late.receive).not.toHaveBeenCalled()
+    h.store.close()
+    late.store.close()
+  })
   it('reads a PR that a notification names by its Issue address as the PR', async () => {
     const h = host()
     h.store.set('github-since', '2026-09-08T00:00:00.000Z')
